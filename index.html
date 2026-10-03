@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>点呼</title>
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 20px; background: #f4f6f4; color: #222; font-size: 16px; }
+  h1 { color: #06a94d; text-align: center; font-size: 20px; margin: 4px 0 18px; }
+  .group { background: #fff; padding: 14px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #dde3dd; }
+  .group p { margin: 0 0 10px; font-weight: bold; line-height: 1.5; }
+  .note { display: block; font-size: 12px; font-weight: normal; color: #666; margin-top: 4px; }
+  .choices { display: flex; gap: 10px; }
+  .choice { flex: 1; padding: 12px; font-size: 16px; font-weight: bold; border: 2px solid #ccc; background: #fff; border-radius: 6px; }
+  .choice.on { background: #06a94d; border-color: #06a94d; color: #fff; }
+  input[type=file], input[type=number] { width: 100%; box-sizing: border-box; padding: 10px; font-size: 16px; border: 2px solid #ccc; border-radius: 6px; }
+  #submit { width: 100%; padding: 14px; font-size: 18px; font-weight: bold; color: #fff; background: #06a94d; border: 0; border-radius: 8px; }
+  #submit:disabled { background: #aaa; }
+  #msg { text-align: center; color: #c33; white-space: pre-wrap; }
+  #log { display: none; font-size: 12px; color: #666; white-space: pre-wrap; word-break: break-all; }
+  button:focus-visible, input:focus-visible { outline: 3px solid #1a73e8; outline-offset: 2px; }
+</style>
+</head>
+<body>
+<h1 id="title">読み込み中...</h1>
+<div id="form"></div>
+<button id="submit" hidden>送信する</button>
+<p id="msg"></p>
+<pre id="log"></pre>
+
+<script>
+// 設定(GASのウェブアプリURLと、LIFF ID)
+const LIFF_ID = "2011818456-Y4bNZe41";
+const GAS_URL = "https://script.google.com/macros/s/AKfycbyAFcTsO_RQkcyHrrEgcqYklweokaUvx05E_5fVPerujFjhVd8sacMWSZJY9FbxcBd2/exec";
+
+const FORMS = {
+  start: { title: "稼働開始点呼", items: [
+    { id: "bodyCheck", q: "1. 体調不良や過度な疲労など、安全運転に不安を感じる要素はありませんか？", type: "choice", opts: ["ない", "ある"] },
+    { id: "carCheck", q: "2. 車両の日常点検を実施し、異常はありませんでしたか？", type: "choice", opts: ["異常なし", "異常あり"] },
+    { id: "alcCheck", q: "3. アルコール検知器による測定を行いましたか？", type: "choice", opts: ["実施した", "未実施"] },
+    { id: "photo", q: "4. アルコール検知器の測定結果の写真", note: "検知器の数値と日付・時間が分かるように撮影してください", type: "photo" }
+  ]},
+  end: { title: "稼働終了点呼", items: [
+    { id: "breath", q: "1. アルコール検知器の測定結果の写真", note: "検知器の数値と日付・時間が分かるように撮影してください", type: "photo" },
+    { id: "amazon", q: "2. Amazonアプリの残荷・配達完了画面などの写真", type: "photo" },
+    { id: "motimodori", q: "3. 破損・持ち戻りの荷物の個数(なければ0)", type: "number" },
+    { id: "mipai", q: "4. 未配の荷物の個数(なければ0)", type: "number" }
+  ]}
+};
+
+const values = {};
+let mode = null, busy = false;
+const $ = id => document.getElementById(id);
+
+// GAS以外(外部ホスティング)で使う場合のURLからのモード取得
+function getMode() {
+  const p = new URLSearchParams(location.search);
+  let m = p.get("mode");
+  if (!m && p.get("liff.state")) {
+    m = new URLSearchParams(p.get("liff.state").replace(/^\/?\??/, "")).get("mode");
+  }
+  return m;
+}
+
+function render() {
+  const f = FORMS[mode];
+  $("title").textContent = f.title;
+  document.title = f.title;
+  $("form").innerHTML = "";
+  f.items.forEach(it => {
+    const g = document.createElement("div");
+    g.className = "group";
+    const p = document.createElement("p");
+    p.textContent = it.q;
+    if (it.note) { const s = document.createElement("span"); s.className = "note"; s.textContent = "※" + it.note; p.appendChild(s); }
+    g.appendChild(p);
+    if (it.type === "choice") {
+      const row = document.createElement("div");
+      row.className = "choices";
+      it.opts.forEach(o => {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "choice"; b.textContent = o;
+        b.onclick = () => { values[it.id] = o; row.querySelectorAll(".choice").forEach(x => x.classList.remove("on")); b.classList.add("on"); };
+        row.appendChild(b);
+      });
+      g.appendChild(row);
+    } else {
+      const i = document.createElement("input");
+      i.id = "f_" + it.id;
+      if (it.type === "photo") { i.type = "file"; i.accept = "image/*"; }
+      else { i.type = "number"; i.min = "0"; i.inputMode = "numeric"; }
+      g.appendChild(i);
+    }
+    $("form").appendChild(g);
+  });
+  $("submit").hidden = false;
+}
+
+// 写真を長辺1280pxのJPEGに縮小(通信量削減)
+function compress(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const s = Math.min(1, 1280 / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL("image/jpeg", 0.7).split(",")[1]);
+    };
+    img.onerror = () => reject(new Error("画像を読み込めませんでした"));
+    img.src = url;
+  });
+}
+
+// GAS内で開いている場合は google.script.run、外部ホスティングの場合は fetch で送信
+function send(payload) {
+  if (window.google && google.script && google.script.run) {
+    return new Promise((ok, ng) => google.script.run.withSuccessHandler(ok).withFailureHandler(ng).submitForm(payload));
+  }
+  return fetch(GAS_URL, { method: "POST", body: JSON.stringify(payload) }).then(r => r.json());
+}
+
+async function submit() {
+  if (busy) return;
+  const f = FORMS[mode], payload = { action: mode };
+  for (const it of f.items) {
+    if (it.type === "choice") {
+      if (!values[it.id]) return alert("⚠️ 未入力の項目があります。\n" + it.q);
+      payload[it.id] = values[it.id];
+    } else {
+      const el = $("f_" + it.id);
+      if (it.type === "photo") {
+        if (!el.files.length) return alert("⚠️ 写真が未選択です。\n" + it.q);
+      } else if (el.value === "") return alert("⚠️ 未入力の項目があります。\n" + it.q);
+    }
+  }
+  busy = true; $("submit").disabled = true; $("submit").textContent = "送信中..."; $("msg").textContent = "";
+  try {
+    for (const it of f.items) {
+      const el = $("f_" + it.id);
+      if (it.type === "photo") payload[it.id] = await compress(el.files[0]);
+      else if (it.type === "number") payload[it.id] = Number(el.value);
+    }
+    payload.idToken = liff.getIDToken();
+    if (!payload.idToken) { liff.login(); return; }
+
+    const res = await send(payload);
+    if (res && res.status === "success") {
+      alert(mode === "start" ? "開始点呼が完了しました。安全運転でお願いします。" : "終了点呼が完了しました。お疲れ様でした。");
+      if (liff.isInClient()) liff.closeWindow();
+      else $("msg").textContent = "送信完了";
+      return;
+    }
+    const m = (res && res.message) || "エラーが発生しました";
+    $("msg").textContent = m;
+    alert(m);
+  } catch (e) {
+    $("msg").textContent = "送信エラー: " + e.message;
+    alert("送信エラー: " + e.message);
+  }
+  busy = false; $("submit").disabled = false; $("submit").textContent = "送信する";
+}
+
+let logBuf = "";
+function log(t) { logBuf += t + "\n"; if ($("log").style.display === "block") $("log").textContent = logBuf; }
+function showLog() { $("log").style.display = "block"; $("log").textContent = logBuf; }
+
+window.onload = async () => {
+  log("1. 画面の読み込み OK");
+  log("2. LIFF部品: " + typeof liff);
+  log("3. GAS画面内で表示: " + (window.top !== window.self));
+  try {
+    const timer = setTimeout(() => { log("⚠ 8秒たっても先に進みません"); showLog(); }, 8000);
+    log("4. LIFF初期化を開始");
+    await liff.init({ liffId: LIFF_ID });
+    clearTimeout(timer);
+    log("5. 初期化OK / LINEアプリ内: " + liff.isInClient() + " / ログイン済み: " + liff.isLoggedIn());
+    if (!liff.isLoggedIn()) { log("6. ログイン画面へ移動します"); liff.login(); return; }
+    mode = getMode();
+    if (mode === "test") { // 接続テスト用
+      let name = "";
+      try { name = (await liff.getProfile()).displayName; } catch (e) { name = "取得失敗: " + e.message; }
+      let srv = "";
+      try {
+        const r = await fetch(GAS_URL, { method: "POST", body: JSON.stringify({ action: "ping" }) }).then(x => x.json());
+        srv = r && r.message ? "OK" : "応答が想定外です";
+      } catch (e) { srv = "NG: " + e.message; }
+      $("title").textContent = "接続テスト";
+      showLog();
+      $("msg").style.color = "#222";
+      $("msg").textContent = "LIFF初期化: OK\nLINEアプリ内: " + liff.isInClient() + "\nログイン: " + liff.isLoggedIn() +
+        "\n表示名: " + name + "\nIDトークン: " + (liff.getIDToken() ? "取得OK" : "取得できず") + "\nサーバー接続: " + srv;
+      return;
+    }
+    if (!FORMS[mode]) { $("title").textContent = "ページが指定されていません"; $("msg").textContent = "リッチメニューから開き直してください。"; return; }
+    render();
+    $("submit").onclick = submit;
+  } catch (e) {
+    $("title").textContent = "起動エラー";
+    $("msg").textContent = "LIFFの初期化に失敗しました: " + e.message;
+    log("エラー: " + (e.code || "") + " " + e.message);
+    showLog();
+  }
+};
+</script>
+</body>
+</html>
