@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>点呼</title>
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 20px; background: #f4f6f4; color: #222; font-size: 16px; }
+  h1 { color: #06a94d; text-align: center; font-size: 20px; margin: 4px 0 18px; }
+  .group { background: #fff; padding: 14px; border-radius: 8px; margin-bottom: 16px; border: 1px solid #dde3dd; }
+  .group p { margin: 0 0 10px; font-weight: bold; line-height: 1.5; }
+  .note { display: block; font-size: 12px; font-weight: normal; color: #666; margin-top: 4px; }
+  .warn { font-size: 13px; font-weight: bold; color: #d32f2f; line-height: 1.5; margin-top: 10px; }
+  .choices { display: grid; gap: 10px; }
+  .choice { padding: 12px 4px; font-size: 16px; font-weight: bold; border: 2px solid #ccc; background: #fff; border-radius: 6px; }
+  .choice.on { background: #06a94d; border-color: #06a94d; color: #fff; }
+  input[type=file], input[type=number] { width: 100%; box-sizing: border-box; padding: 10px; font-size: 16px; border: 2px solid #ccc; border-radius: 6px; }
+  #submit { width: 100%; padding: 14px; font-size: 18px; font-weight: bold; color: #fff; background: #06a94d; border: 0; border-radius: 8px; }
+  #submit:disabled { background: #aaa; }
+  #msg { text-align: center; color: #c33; white-space: pre-wrap; }
+  #log { font-size: 12px; color: #666; white-space: pre-wrap; word-break: break-all; }
+  button:focus-visible, input:focus-visible { outline: 3px solid #1a73e8; outline-offset: 2px; }
+</style>
+</head>
+<body>
+<h1 id="title">読み込み中...</h1>
+<div id="form"></div>
+<button id="submit" hidden>送信する</button>
+<p id="msg"></p>
+<pre id="log" hidden></pre>
+
+<script>
+// ★★★ ここの2行だけ書き換えてください ★★★
+const LIFF_ID = "https://liff.line.me/2012053878-wsLo7J8j";        // 例: 1234567890-AbCdEfGh
+const GAS_URL = "https://script.google.com/macros/s/AKfycbzDOkPdM31sjD0AoU8pQKSHmpp38ZbUs0rPmTjL7rStumOIz9nFvgRmXM_sxXGZQ4Kjfw/exec"; // 例: https://script.google.com/macros/s/xxxx/exec
+
+const FORMS = {
+  start: { title: "稼働開始点呼", items: [
+    { id: "bodyCheck", q: "1. 体調不良や過度な疲労など、安全に不安を感じる要素はありませんか？", type: "choice", opts: ["ない", "ある"] },
+    { id: "bagCheck", q: "2. ミルクランから荷物を受け取りましたか？", type: "choice", opts: ["受け取った", "受け取っていない"] },
+    { id: "weather", q: "3. 今日の天気", type: "choice", opts: ["晴れ", "曇り", "雨", "雪"] },
+    { id: "photo", q: "4. Amazonアプリのログイン画面のスクリーンショットを添付してください。", note: "配達開始前（ログインしていない状態）の画面をお願いします。", type: "photo" }
+  ]},
+  end: { title: "稼働終了点呼", items: [
+    { id: "cycleWalker", q: "1. 本日の稼働（Cycle1 / Cycle2）", note: "両方稼働した場合は、両方を選んでください。", type: "multi", opts: ["Cycle1", "Cycle2"],
+      warn: "選択された稼働とロスタリングなどをもとに報酬の計算をします。正しい稼働を入力してください。" },
+    { id: "photo", q: "2. Amazonアプリのログアウト画面のスクリーンショットを添付してください。", type: "photo" },
+    { id: "motimodori", q: "3. 破損・持ち戻りの荷物の個数（なければ0）", type: "number" },
+    { id: "mipai", q: "4. 未配の荷物の個数（なければ0）", type: "number" }
+  ]}
+};
+
+const values = {};
+let mode = null, busy = false;
+const $ = id => document.getElementById(id);
+const notSet = s => !s || String(s).indexOf("ここに") >= 0;
+
+// URLからモード(start / end / test)を取得。LINEが付ける liff.state にも対応
+function getMode() {
+  const p = new URLSearchParams(location.search);
+  let m = p.get("mode");
+  if (!m && p.get("liff.state")) {
+    m = new URLSearchParams(p.get("liff.state").replace(/^\/?\??/, "")).get("mode");
+  }
+  return m;
+}
+
+function render() {
+  const f = FORMS[mode];
+  $("title").textContent = f.title;
+  document.title = f.title;
+  $("form").innerHTML = "";
+  f.items.forEach(it => {
+    const g = document.createElement("div");
+    g.className = "group";
+    const p = document.createElement("p");
+    p.textContent = it.q;
+    if (it.note) { const s = document.createElement("span"); s.className = "note"; s.textContent = "※" + it.note; p.appendChild(s); }
+    g.appendChild(p);
+    if (it.type === "choice" || it.type === "multi") {
+      const row = document.createElement("div");
+      row.className = "choices";
+      row.style.gridTemplateColumns = "repeat(" + it.opts.length + ", 1fr)";
+      it.opts.forEach(o => {
+        const b = document.createElement("button");
+        b.type = "button"; b.className = "choice"; b.textContent = o;
+        b.onclick = () => {
+          if (it.type === "choice") {
+            values[it.id] = o;
+            row.querySelectorAll(".choice").forEach(x => x.classList.remove("on"));
+            b.classList.add("on");
+          } else { // 複数選択(押すたびに選択/解除)
+            const cur = values[it.id] || [];
+            const k = cur.indexOf(o);
+            if (k >= 0) cur.splice(k, 1); else cur.push(o);
+            values[it.id] = cur;
+            b.classList.toggle("on", k < 0);
+          }
+        };
+        row.appendChild(b);
+      });
+      g.appendChild(row);
+    } else {
+      const i = document.createElement("input");
+      i.id = "f_" + it.id;
+      if (it.type === "photo") { i.type = "file"; i.accept = "image/*"; }
+      else { i.type = "number"; i.min = "0"; i.step = "1"; i.inputMode = "numeric"; }
+      g.appendChild(i);
+    }
+    if (it.warn) { const w = document.createElement("div"); w.className = "warn"; w.textContent = it.warn; g.appendChild(w); }
+    $("form").appendChild(g);
+  });
+  $("submit").hidden = false;
+}
+
+// 写真を長辺1280pxのJPEGに縮小(通信量削減)
+function compress(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image(), url = URL.createObjectURL(file);
+    img.onload = () => {
+      const s = Math.min(1, 1280 / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL("image/jpeg", 0.7).split(",")[1]);
+    };
+    img.onerror = () => reject(new Error("画像を読み込めませんでした"));
+    img.src = url;
+  });
+}
+
+function send(payload) {
+  return fetch(GAS_URL, { method: "POST", body: JSON.stringify(payload) }).then(r => r.json());
+}
+
+async function submit() {
+  if (busy) return;
+  const f = FORMS[mode], payload = { action: mode };
+  // すべて必須。1つでも未入力ならポップアップを出して送信しない
+  for (const it of f.items) {
+    const missing = "⚠️ 未入力の項目があります。\n" + it.q;
+    if (it.type === "choice") {
+      if (!values[it.id]) return alert(missing);
+      payload[it.id] = values[it.id];
+    } else if (it.type === "multi") {
+      const sel = values[it.id] || [];
+      if (!sel.length) return alert(missing);
+      payload[it.id] = sel.slice().sort().join(",");
+    } else {
+      const el = $("f_" + it.id);
+      if (it.type === "photo") {
+        if (!el.files.length) return alert(missing);
+      } else {
+        if (el.value === "") return alert(missing);
+        const n = Number(el.value);
+        if (!Number.isInteger(n) || n < 0) return alert("⚠️ 0以上の整数で入力してください。\n" + it.q);
+      }
+    }
+  }
+  busy = true; $("submit").disabled = true; $("submit").textContent = "送信中..."; $("msg").textContent = "";
+  try {
+    for (const it of f.items) {
+      const el = $("f_" + it.id);
+      if (it.type === "photo") payload[it.id] = await compress(el.files[0]);
+      else if (it.type === "number") payload[it.id] = Number(el.value);
+    }
+    payload.idToken = liff.getIDToken();
+    if (!payload.idToken) { liff.login(); return; }
+
+    const res = await send(payload);
+    if (res && res.status === "success") {
+      alert(mode === "start" ? "開始点呼が完了しました。安全第一でお願いします。" : "終了点呼が完了しました。お疲れ様でした。");
+      if (liff.isInClient()) liff.closeWindow();
+      else $("msg").textContent = "送信完了";
+      return;
+    }
+    const m = (res && res.message) || "エラーが発生しました";
+    $("msg").textContent = m;
+    alert(m);
+  } catch (e) {
+    $("msg").textContent = "送信エラー: " + e.message;
+    alert("送信エラー: " + e.message);
+  }
+  busy = false; $("submit").disabled = false; $("submit").textContent = "送信する";
+}
+
+// 起動エラーのときだけ表示する確認用ログ
+function log(t) { $("log").hidden = false; $("log").textContent += t + "\n"; }
+
+window.onload = async () => {
+  if (notSet(LIFF_ID) || notSet(GAS_URL)) {
+    $("title").textContent = "設定が未完了です";
+    $("msg").textContent = "index_walker.html の LIFF_ID と GAS_URL を設定してください。";
+    return;
+  }
+  try {
+    await liff.init({ liffId: LIFF_ID });
+    if (!liff.isLoggedIn()) { liff.login(); return; }
+    mode = getMode();
+    if (mode === "test") { // 接続テスト用(LIFFのURLの最後を ?mode=test にして開く)
+      let name = "";
+      try { name = (await liff.getProfile()).displayName; } catch (e) { name = "取得失敗: " + e.message; }
+      $("title").textContent = "接続テスト";
+      $("msg").style.color = "#222";
+      $("msg").textContent = "LIFF初期化: OK\nLINEアプリ内: " + liff.isInClient() + "\nログイン: " + liff.isLoggedIn() +
+        "\n表示名: " + name + "\nIDトークン: " + (liff.getIDToken() ? "取得OK" : "取得できず");
+      return;
+    }
+    if (!FORMS[mode]) { $("title").textContent = "ページが指定されていません"; $("msg").textContent = "リッチメニューから開き直してください。"; return; }
+    render();
+    $("submit").onclick = submit;
+  } catch (e) {
+    $("title").textContent = "起動エラー";
+    $("msg").textContent = "LIFFの初期化に失敗しました: " + e.message;
+    log("エラー: " + (e.code || "") + " " + e.message);
+  }
+};
+</script>
+</body>
+</html>
