@@ -32,8 +32,8 @@
 
 <script>
 // ★★★ ここの2行だけ書き換えてください ★★★
-const LIFF_ID = "https://liff.line.me/2012053878-wsLo7J8j";        // 例: 1234567890-AbCdEfGh
-const GAS_URL = "https://script.google.com/macros/s/AKfycbzDOkPdM31sjD0AoU8pQKSHmpp38ZbUs0rPmTjL7rStumOIz9nFvgRmXM_sxXGZQ4Kjfw/exec"; // 例: https://script.google.com/macros/s/xxxx/exec
+const LIFF_ID = "ここにLIFF IDを貼り付け";        // 例: 1234567890-AbCdEfGh
+const GAS_URL = "ここにウェブアプリのURLを貼り付け"; // 例: https://script.google.com/macros/s/xxxx/exec
 
 const FORMS = {
   start: { title: "稼働開始点呼", items: [
@@ -213,10 +213,17 @@ window.onload = async () => {
     $("submit").onclick = submit;
   } catch (e) {
     $("title").textContent = "起動エラー";
-    $("msg").textContent = "LIFFの初期化に失敗しました: " + e.message;
-    log("エラー: " + (e.code || "") + " " + e.message);
+    $("msg").textContent = "LIFFの初期化に失敗しました: " + (e.message || e);
+    // 原因調査用の情報(このまま画面を撮影して送ってください)
+    log("エラー内容: " + (e.code || "") + " " + (e.message || e));
+    log("LIFF_ID: " + LIFF_ID);
+    log("開いたURL: " + location.href);
   }
 };
+
+// 想定外のエラーも画面に出す(「システムエラー」の原因調査用)
+window.addEventListener("error", ev => { $("msg").textContent = "画面エラー: " + ev.message; log("画面エラー: " + ev.message + " (" + (ev.filename || "") + ":" + (ev.lineno || "") + ")"); });
+window.addEventListener("unhandledrejection", ev => { const m = (ev.reason && ev.reason.message) || String(ev.reason); $("msg").textContent = "処理エラー: " + m; log("処理エラー: " + m); });
 </script>
 </body>
 </html>
