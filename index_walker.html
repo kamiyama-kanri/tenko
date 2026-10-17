@@ -29,11 +29,12 @@
 <button id="submit" hidden>送信する</button>
 <p id="msg"></p>
 <pre id="log" hidden></pre>
+<p id="ver" style="text-align:center;font-size:11px;color:#aaa;margin-top:24px"></p>
 
 <script>
 // ★★★ ここの2行だけ書き換えてください ★★★
-const LIFF_ID = "ここにLIFF IDを貼り付け";        // 例: 1234567890-AbCdEfGh
-const GAS_URL = "ここにウェブアプリのURLを貼り付け"; // 例: https://script.google.com/macros/s/xxxx/exec
+const LIFF_ID = "2012053878-wsLo7J8j";   // LIFF ID(URLではなく、IDだけを入れる)
+const GAS_URL = "https://script.google.com/macros/s/AKfycbzDOkPdM31sjD0AoU8pQKSHmpp38ZbUs0rPmTjL7rStumOIz9nFvgRmXM_sxXGZQ4Kjfw/exec"; // GASのウェブアプリURL
 
 const FORMS = {
   start: { title: "稼働開始点呼", items: [
@@ -190,6 +191,7 @@ async function submit() {
 function log(t) { $("log").hidden = false; $("log").textContent += t + "\n"; }
 
 window.onload = async () => {
+  $("ver").textContent = "版: 2026-10-17-v3";   // 画面の一番下に出ます(最新版かどうかの確認用)
   if (notSet(LIFF_ID) || notSet(GAS_URL)) {
     $("title").textContent = "設定が未完了です";
     $("msg").textContent = "index_walker.html の LIFF_ID と GAS_URL を設定してください。";
