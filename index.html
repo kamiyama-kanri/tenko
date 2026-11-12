@@ -23,6 +23,9 @@
   .grid-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
   .grid-label { flex: none; width: 6.5em; font-weight: bold; }
   .grid-row .choices { flex: 1; }
+  .thumb { display: none; height: 64px; margin-top: 8px; border-radius: 4px; border: 1px solid #ccc; }
+  .ok { display: none; color: #06a94d; font-size: 13px; font-weight: bold; margin-top: 4px; }
+  #ver { text-align: center; color: #aaa; font-size: 11px; margin: 14px 0 0; }
   button:focus-visible, input:focus-visible { outline: 3px solid #1a73e8; outline-offset: 2px; }
 </style>
 </head>
@@ -32,6 +35,7 @@
 <button id="submit" hidden>送信する</button>
 <p id="msg"></p>
 <pre id="log"></pre>
+<p id="ver"></p>
 
 <script>
 // 設定(GASのウェブアプリURLと、LIFF ID)
@@ -43,7 +47,9 @@ const FORMS = {
     { id: "bodyCheck", q: "1. 体調不良や過度な疲労など、安全運転に不安を感じる要素はありませんか？", type: "choice", opts: ["ない", "ある"] },
     { id: "carCheck", q: "2. 車両の日常点検を実施し、異常はありませんでしたか？", type: "choice", opts: ["異常なし", "異常あり"] },
     { id: "alcCheck", q: "3. アルコール検知器による測定を行いましたか？", type: "choice", opts: ["実施した", "未実施"] },
-    { id: "photo", q: "4. アルコール検知器の測定結果の写真", note: "検知器の数値と日付・時間が分かるように撮影してください", type: "photo" }
+    { id: "photo", q: "4. アルコール呼気チェックシートの写真", note: "数値と日付・時間が分かるように", type: "photo" },
+    { id: "photoRabbit", q: "5. ラビットにログインする前の画面", note: "ログインしていないことがわかる画面", type: "photo" },
+    { id: "photoMentor", q: "6. メンターにログインした画面", note: "立ち上げていることがわかる画面", type: "photo" }
   ]},
   end: { title: "稼働終了点呼", items: [
     { id: "cycle", q: "1. 本日の稼働を教えてください", note: "当てはまるものをすべて選んでください(Cycle1・Cycle2の両方も可)", warn: "【注意】選択された稼働とロスタリングなどをもとに報酬の計算をします。正しい稼働を入力してください。",
@@ -131,7 +137,15 @@ function render() {
     } else {
       const i = document.createElement("input");
       i.id = "f_" + it.id;
-      if (it.type === "photo") { i.type = "file"; i.accept = "image/*"; }
+      if (it.type === "photo") {
+        i.type = "file"; i.accept = "image/*";
+        const th = document.createElement("img"); th.className = "thumb"; th.id = "t_" + it.id;
+        const ok = document.createElement("span"); ok.className = "ok"; ok.id = "o_" + it.id;
+        i.onchange = () => prepPhoto(it.id, i.files[0]);
+        g.appendChild(i); g.appendChild(th); g.appendChild(ok);
+        $("form").appendChild(g);
+        return;
+      }
       else { i.type = "number"; i.min = "0"; i.inputMode = "numeric"; }
       g.appendChild(i);
     }
@@ -140,30 +154,69 @@ function render() {
   $("submit").hidden = false;
 }
 
-// 写真を長辺1280pxのJPEGに縮小(通信量削減)
-function compress(file) {
-  return new Promise((resolve, reject) => {
-    const img = new Image(), url = URL.createObjectURL(file);
-    img.onload = () => {
-      const s = Math.min(1, 1280 / Math.max(img.width, img.height));
-      const c = document.createElement("canvas");
-      c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
-      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-      URL.revokeObjectURL(url);
-      resolve(c.toDataURL("image/jpeg", 0.7).split(",")[1]);
-    };
-    img.onerror = () => reject(new Error("画像を読み込めませんでした"));
-    img.src = url;
-  });
+// ---- 写真: 選んだ瞬間に小さく圧縮しておく(送信ボタンを押したときの待ち時間を減らす) ----
+// 長辺1024px・画質0.6。PC画面で内容が読める大きさで、1枚あたり約60〜150KBになります
+const PHOTO_SIDE = 1024, PHOTO_QUALITY = 0.6;
+const photos = {};   // id -> Promise<base64>
+
+async function compress(file) {
+  let src, w, h, release = () => {};
+  if (window.createImageBitmap) {
+    try { src = await createImageBitmap(file, { imageOrientation: "from-image" }); w = src.width; h = src.height; release = () => src.close && src.close(); } catch (e) { src = null; }
+  }
+  if (!src) {
+    src = await new Promise((ok, ng) => {
+      const img = new Image(), url = URL.createObjectURL(file);
+      img.onload = () => { URL.revokeObjectURL(url); ok(img); };
+      img.onerror = () => { URL.revokeObjectURL(url); ng(new Error("画像を読み込めませんでした")); };
+      img.src = url;
+    });
+    w = src.naturalWidth || src.width; h = src.naturalHeight || src.height;
+  }
+  const s = Math.min(1, PHOTO_SIDE / Math.max(w, h));
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(w * s)); c.height = Math.max(1, Math.round(h * s));
+  c.getContext("2d").drawImage(src, 0, 0, c.width, c.height);
+  release();
+  const url = c.toDataURL("image/jpeg", PHOTO_QUALITY);
+  return { base64: url.split(",")[1], url };
 }
 
-// GAS内で開いている場合は google.script.run、外部ホスティングの場合は fetch で送信
+function prepPhoto(id, file) {
+  const th = $("t_" + id), ok = $("o_" + id);
+  th.style.display = "none"; ok.style.display = "none";
+  if (!file) { delete photos[id]; return; }
+  ok.style.display = "block"; ok.style.color = "#666"; ok.textContent = "写真を準備中...";
+  photos[id] = compress(file).then(r => {
+    th.src = r.url; th.style.display = "block";
+    ok.style.color = "#06a94d"; ok.textContent = "✓ 写真OK(" + Math.round(r.base64.length * 0.75 / 1024) + "KB)";
+    return r.base64;
+  });
+  photos[id].catch(e => { ok.style.color = "#c33"; ok.textContent = "写真を読み込めませんでした。撮り直してください"; });
+}
+
+// ---- 送信 ----
+// GAS内で開いている場合は google.script.run、外部ホスティングの場合は fetch で送信(90秒で打ち切り)
 function send(payload) {
   if (window.google && google.script && google.script.run) {
     return new Promise((ok, ng) => google.script.run.withSuccessHandler(ok).withFailureHandler(ng).submitForm(payload));
   }
-  return fetch(GAS_URL, { method: "POST", body: JSON.stringify(payload) }).then(r => r.json());
+  const ac = new AbortController(), t = setTimeout(() => ac.abort(), 90000);
+  return fetch(GAS_URL, { method: "POST", body: JSON.stringify(payload), signal: ac.signal })
+    .then(r => r.json()).finally(() => clearTimeout(t));
 }
+
+// 通信エラーのときだけ、同じ reqId で最大2回まで自動で送り直す(サーバーが二重登録を防ぎます)
+async function sendWithRetry(payload) {
+  let last;
+  for (let n = 0; n < 3; n++) {
+    try { return await send(payload); } catch (e) { last = e; $("submit").textContent = "再送信中..."; await new Promise(r => setTimeout(r, 1500)); }
+  }
+  throw last;
+}
+
+let reqId = null;     // 1回の点呼につき1つ。失敗して押し直しても同じ番号を使う
+let liffReady = null; // LIFFの準備(画面表示と並行して進める)
 
 async function submit() {
   if (busy) return;
@@ -178,36 +231,37 @@ async function submit() {
     } else if (it.type === "choice") {
       if (!values[it.id]) return alert("⚠️ 未入力の項目があります。\n" + it.q);
       payload[it.id] = values[it.id];
-    } else {
-      const el = $("f_" + it.id);
-      if (it.type === "photo") {
-        if (!el.files.length) return alert("⚠️ 写真が未選択です。\n" + it.q);
-      } else if (el.value === "") return alert("⚠️ 未入力の項目があります。\n" + it.q);
-    }
+    } else if (it.type === "photo") {
+      if (!photos[it.id]) return alert("⚠️ 写真が未選択です。\n" + it.q);
+    } else if ($("f_" + it.id).value === "") return alert("⚠️ 未入力の項目があります。\n" + it.q);
   }
   busy = true; $("submit").disabled = true; $("submit").textContent = "送信中..."; $("msg").textContent = "";
   try {
     for (const it of f.items) {
-      const el = $("f_" + it.id);
-      if (it.type === "photo") payload[it.id] = await compress(el.files[0]);
-      else if (it.type === "number") payload[it.id] = Number(el.value);
+      if (it.type === "photo") payload[it.id] = await photos[it.id];
+      else if (it.type === "number") payload[it.id] = Number($("f_" + it.id).value);
     }
+    await liffReady;
     payload.idToken = liff.getIDToken();
     if (!payload.idToken) { liff.login(); return; }
+    payload.reqId = reqId || (reqId = Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
 
-    const res = await send(payload);
+    const res = await sendWithRetry(payload);
     if (res && res.status === "success") {
+      reqId = null;
       alert(mode === "start" ? "開始点呼が完了しました。安全運転でお願いします。" : "終了点呼が完了しました。お疲れ様でした。");
       if (liff.isInClient()) liff.closeWindow();
       else $("msg").textContent = "送信完了";
       return;
     }
+    if (res && res.status !== "success") reqId = null; // サーバーが内容を受け付けなかった場合は新しい番号で
     const m = (res && res.message) || "エラーが発生しました";
     $("msg").textContent = m;
     alert(m);
   } catch (e) {
-    $("msg").textContent = "送信エラー: " + e.message;
-    alert("送信エラー: " + e.message);
+    const m = "送信できませんでした。電波の良い場所でもう一度「送信する」を押してください。(" + e.message + ")";
+    $("msg").textContent = m;
+    alert(m);
   }
   busy = false; $("submit").disabled = false; $("submit").textContent = "送信する";
 }
@@ -216,18 +270,25 @@ let logBuf = "";
 function log(t) { logBuf += t + "\n"; if ($("log").style.display === "block") $("log").textContent = logBuf; }
 function showLog() { $("log").style.display = "block"; $("log").textContent = logBuf; }
 
+const VERSION = "2026-11-12-v4";
+
+// 画面を先に表示し、LIFFの準備は裏で進める(開くまでの待ち時間を短くする)
 window.onload = async () => {
-  log("1. 画面の読み込み OK");
+  $("ver").textContent = "ver " + VERSION;
+  log("1. 画面の読み込み OK / ver " + VERSION);
   log("2. LIFF部品: " + typeof liff);
   log("3. GAS画面内で表示: " + (window.top !== window.self));
   try {
+    mode = getMode();
+    if (FORMS[mode]) { render(); $("submit").onclick = submit; } // 先に画面を出す
     const timer = setTimeout(() => { log("⚠ 8秒たっても先に進みません"); showLog(); }, 8000);
     log("4. LIFF初期化を開始");
-    await liff.init({ liffId: LIFF_ID });
+    liffReady = liff.init({ liffId: LIFF_ID });
+    await liffReady;
     clearTimeout(timer);
     log("5. 初期化OK / LINEアプリ内: " + liff.isInClient() + " / ログイン済み: " + liff.isLoggedIn());
     if (!liff.isLoggedIn()) { log("6. ログイン画面へ移動します"); liff.login(); return; }
-    mode = getMode();
+    if (!mode) mode = getMode();
     if (mode === "test") { // 接続テスト用
       let name = "";
       try { name = (await liff.getProfile()).displayName; } catch (e) { name = "取得失敗: " + e.message; }
@@ -244,8 +305,7 @@ window.onload = async () => {
       return;
     }
     if (!FORMS[mode]) { $("title").textContent = "ページが指定されていません"; $("msg").textContent = "リッチメニューから開き直してください。"; return; }
-    render();
-    $("submit").onclick = submit;
+    if (!$("submit").onclick) { render(); $("submit").onclick = submit; }
   } catch (e) {
     $("title").textContent = "起動エラー";
     $("msg").textContent = "LIFFの初期化に失敗しました: " + e.message;
